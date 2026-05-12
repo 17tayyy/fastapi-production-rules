@@ -4,6 +4,104 @@ Production-grade conventions for FastAPI projects. Follow these strictly when ge
 
 ---
 
+## Toolchain
+
+Always use the Astral stack. Never use pip, black, flake8, isort, or mypy directly.
+
+### Package manager — uv
+
+```bash
+uv sync                    # install all dependencies including dev
+uv sync --no-dev           # production only
+uv add package-name        # add production dependency
+uv add --dev package-name  # add dev dependency
+uv remove package-name     # remove dependency
+uv run pytest              # run any command in project environment
+```
+
+Never use `pip install` in a uv project. Always commit `uv.lock`.
+
+### pyproject.toml structure
+
+```toml
+[project]
+name = "my-project"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi[standard]>=0.135.1",
+  "pydantic>=2.0.0",
+  "pydantic-settings>=2.0.0",
+  "structlog>=25.5.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.8.0",
+  "ty==0.0.12",
+  "pytest-cov>=7.1.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade — modernizes Python syntax automatically
+    "B",   # flake8-bugbear — catches common bugs
+    "S",   # flake8-bandit — security checks
+    "T20", # flake8-print — catches print() statements
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S106", "S108", "S105"]
+"scripts/*" = ["T201", "T203"]
+
+[tool.ty.src]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+```
+
+### Linter and formatter — ruff
+
+```bash
+uv run ruff check . --fix  # lint and autofix
+uv run ruff format .       # format
+uv run ruff format . --check  # CI check without modifying
+```
+
+`--fix` automatically removes unused imports, upgrades syntax, corrects import order. Always run before committing.
+
+### Type checker — ty
+
+```bash
+uv run ty check app/
+```
+
+ty is Astral's type checker written in Rust. Use it instead of mypy or pyright.
+
+### Pre-commit checklist
+
+Run in this order before every commit:
+
+```bash
+uv run ruff check . --fix
+uv run ruff format .
+uv run ty check .
+uv run pytest
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -304,7 +402,6 @@ def get_logger():
 ```
 
 ```python
-# In any module
 from app.core.logging.logger import get_logger
 logger = get_logger()
 
@@ -313,38 +410,25 @@ logger.info("ticket.created", ticket_id=str(ticket.id), org_id=str(org_id))
 logger.warning("auth.login_failed", email=email, reason="invalid_password")
 logger.error("billing.webhook_failed", event_type=event, error=str(e))
 
-# WRONG — formatted strings, no structure
+# WRONG
 logger.info(f"Ticket {ticket.id} created")
 print(f"Login failed for {email}")
 ```
 
-**Event naming convention:** `domain.action` — `ticket.created`, `auth.login_failed`, `billing.payment_failed`
+**Event naming:** `domain.action` — `ticket.created`, `auth.login_failed`, `billing.payment_failed`
 
-**Bind request context for traceability:**
+**Bind request context:**
 ```python
-# middleware
 structlog.contextvars.bind_contextvars(request_id=str(uuid.uuid4()))
 ```
 
-Every log line in that request now carries `request_id` automatically.
+**Never log:** passwords, tokens, LLM responses, file contents, PII.
 
-**Never log:**
-- Passwords or password hashes
-- Raw tokens or secrets
-- LLM response content
-- File contents or binary data
-- PII beyond what's strictly necessary
-
-**Minimum events to log:**
-- `auth.login_success`, `auth.login_failed`, `auth.magic_link_sent`
-- `ticket.created`, `ticket.updated`, `ticket.deleted`
-- `billing.checkout_created`, `billing.payment_failed`, `billing.subscription_activated`
+**Minimum events:** `auth.login_success`, `auth.login_failed`, `ticket.created`, `ticket.updated`, `ticket.deleted`, `billing.payment_failed`.
 
 ---
 
 ## Rule 9 — Rate Limiting
-
-Apply rate limits to all public or sensitive endpoints.
 
 ```python
 from app.core.limiter import limiter
@@ -355,53 +439,35 @@ async def login(request: Request, data: LoginSchema) -> DataResponse[TokenRespon
     ...
 ```
 
-**Minimum rate limits:**
-- `POST /auth/login` — 10/min
-- `POST /auth/register` — 5/min
-- `POST /auth/magic-link` — 5/min
-- `POST /organizations/invite` — 5/min
-- `POST /ai/chat` — 20/min per user
+**Minimum limits:** login 10/min, register 5/min, magic-link 5/min, invite 5/min, AI chat 20/min per user.
 
 ---
 
 ## Rule 10 — Background Tasks
 
-Use an async-native task queue (ARQ, Taskiq) for async stacks. Use Celery for sync stacks. Either way, the rules are the same.
-
 ```python
-# Enqueue from service or router
 await task_queue.enqueue("process_knowledge_file", node_id=str(node.id))
 
-# Task definition
 async def process_knowledge_file(node_id: str) -> None:
     logger.info("knowledge.indexing_started", node_id=node_id)
-    # work here
     logger.info("knowledge.indexing_done", node_id=node_id)
 ```
 
-**Rules:**
-- Tasks must be **idempotent** — safe to retry if they fail
-- Never enqueue a task from inside another task
-- Always log start and end of every task
-- Pass primitive types as arguments (str, int), not ORM objects
+Tasks must be idempotent. Never enqueue from inside another task. Pass primitives, not ORM objects.
 
 ---
 
 ## Rule 11 — SQLAlchemy Models
 
-Every model must have `created_at` and `updated_at`.
+Every model must have `created_at` and `updated_at`. Always index `organization_id` and fields used in frequent filters.
 
 ```python
 class Ticket(Base):
     __tablename__ = "tickets"
-
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     title: Mapped[str]
-    status: Mapped[TicketStatus] = mapped_column(default=TicketStatus.OPEN)
-    priority: Mapped[TicketPriority] = mapped_column(default=TicketPriority.MEDIUM)
     organization_id: Mapped[UUID] = mapped_column(index=True)
     created_by: Mapped[UUID]
-    assigned_to: Mapped[UUID | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc),
@@ -409,28 +475,15 @@ class Ticket(Base):
     )
 ```
 
-Always index `organization_id`, `status`, and any field used in frequent filters.
-
 ---
 
 ## Rule 12 — Auth (JWT)
 
-**JWT payload:**
-```json
-{ "sub": "user_id", "org": "organization_id", "role": "role" }
-```
+JWT payload: `{ "sub": "user_id", "org": "organization_id", "role": "role" }`
 
-**Refresh tokens:**
-- Store hashed (SHA-256) in the database
-- Set TTL via DB-level expiry or a scheduled cleanup
-- Rotate on every use
-- Web clients: `httpOnly` cookie, never response body
-- Mobile clients: response body
+Refresh tokens: store SHA-256 hash, rotate on every use, httpOnly cookie for web, response body for mobile.
 
-**Magic links:**
-- Store SHA-256 hash with TTL
-- Mark `used=True` after first use — never reusable
-- Purpose field: `"register"` (30 min TTL) | `"invite"` (7 days TTL)
+Magic links: store SHA-256 hash with TTL, mark `used=True` after first use, never reusable.
 
 ---
 
@@ -448,9 +501,7 @@ async def validate_upload(file: UploadFile) -> None:
         raise AppError(f"File too large, max {MAX_SIZE_MB}MB")
 ```
 
-- Validate extension against an allowlist — never trust `Content-Type`
-- Save with a UUID filename, never the original name (path traversal risk)
-- Never serve files without authentication
+Validate extension against allowlist, never trust `Content-Type`. Save with UUID filename. Never serve without authentication.
 
 ---
 
@@ -458,18 +509,14 @@ async def validate_upload(file: UploadFile) -> None:
 
 ```python
 # constants.py — never changes between environments
-ALLOWED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MAX_AVATAR_SIZE_MB = 2
 INVITE_TOKEN_EXPIRE_DAYS = 7
 MAGIC_LINK_EXPIRE_MINUTES = 30
 
-# config.py — environment-specific values and secrets
+# config.py — secrets and environment-specific values
 class Settings(BaseSettings):
     secret_key: SecretStr
     database_url: str
     redis_url: str
-    stripe_secret_key: SecretStr
-    smtp_host: str
 ```
 
 ---
@@ -482,7 +529,7 @@ class Settings(BaseSettings):
 | Classes | `PascalCase` | `TicketService` |
 | Functions/variables | `snake_case` | `create_ticket` |
 | Constants | `UPPER_SNAKE_CASE` | `MAX_FILE_SIZE_MB` |
-| DB tables | `snake_case` plural | `tickets`, `ai_chat_threads` |
+| DB tables | `snake_case` plural | `tickets` |
 | Endpoints | `kebab-case` | `/api/v1/tickets/new` |
 | Log events | `domain.action` | `ticket.created` |
 | Task names | `snake_case` verb-noun | `process_knowledge_file` |
@@ -491,10 +538,8 @@ class Settings(BaseSettings):
 
 ## Rule 16 — Async Rules
 
-Never use synchronous I/O inside async functions.
-
 ```python
-# WRONG — blocks the event loop
+# WRONG — blocks event loop
 async def upload_file(file: UploadFile):
     content = file.read()
 
@@ -502,7 +547,7 @@ async def upload_file(file: UploadFile):
 async def upload_file(file: UploadFile):
     content = await file.read()
 
-# WRONG — CPU-bound blocks the event loop
+# WRONG — CPU-bound blocks event loop
 async def process(text: str):
     result = heavy_cpu_function(text)
 
@@ -515,18 +560,9 @@ async def process(text: str):
 
 ## Rule 17 — No Over-Engineering
 
-**Do not use:**
-- Repository pattern if you already have an ORM — the ORM is your abstraction layer. Adding a repository on top is writing your own ORM on top of an ORM. Only use it with raw SQL.
-- Abstract base classes for services — services are not interchangeable at runtime. Plain functions are enough.
-- Event buses or pub/sub systems — use a task queue (ARQ, Celery).
-- DI containers — FastAPI `Depends()` is sufficient.
-- Generic CRUD base classes — each domain has specific logic that doesn't generalize cleanly.
+Do not use: repository pattern with an ORM, abstract base classes for services, event buses, DI containers, generic CRUD base classes.
 
-**Use:**
-- Plain async functions in service files
-- Direct ORM calls in services
-- FastAPI `Depends()` with `Annotated` type aliases
-- Task queue only when a job would block the request
+Use: plain async functions in services, direct ORM calls, FastAPI `Depends()` with `Annotated` aliases, task queue only when a job blocks the request.
 
 ---
 
@@ -547,7 +583,6 @@ logger.info("ticket.created", ticket_id=str(ticket.id))
 - [ ] Query scoped by `organization_id`
 - [ ] Sensitive fields excluded from response schema
 - [ ] Rate limiting applied if public or sensitive
-- [ ] Subscription check applied if behind paywall
 - [ ] Errors raised as `AppError` subclasses
 - [ ] No passwords, tokens, or PII in logs
 - [ ] `updated_at` updated on mutations
@@ -673,4 +708,3 @@ async def list_tickets(
         skip=skip,
         limit=limit,
     )
-```
