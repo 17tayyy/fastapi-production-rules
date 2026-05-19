@@ -40,4 +40,5 @@ Examples use SQLAlchemy + Celery but every principle applies to any ORM or task 
 ## Related
 
 [How I structure FastAPI projects in production — and why](https://bytay.dev/blog/how-i-structure-fastapi-projects) — the post explaining the reasoning behind these rules.
+
 [The Python Toolchain I Use in Production: uv, ruff, and ty](https://bytay.dev/blog/python-toolchain-uv-ruff-ty/) - another post explaining why i use all the astral stack (uv, ruff and ty)
